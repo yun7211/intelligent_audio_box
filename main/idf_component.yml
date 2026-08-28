@@ -1,0 +1,90 @@
+## IDF Component Manager Manifest File
+dependencies:
+  78/esp-wifi-connect: ~3.1.3
+  # Despite its historical name, this component also provides the shared
+  # HTTP/MQTT/UDP/WebSocket interfaces and ESP implementations used by Wi-Fi.
+  78/esp-ml307: ~3.6.5
+  78/xiaozhi-fonts: ~1.6.0
+
+  # These three components are DIRECT dependencies of `main` (its sources include
+  # their headers: model_path.h / audio_codec.h / audio effects), so they must stay
+  # present in both builds. Only the VERSION switches with CONFIG_USE_WEBRTC_CALL:
+  # OFF keeps the original versions (default build unchanged); ON relaxes to the
+  # versions the WebRTC components require (esp_audio_effects ~1.3, esp_audio_codec
+  # ~2.5, esp-sr ^2.4 via esp_capture) so they resolve against esp_capture/gmf_audio.
+  espressif/esp_audio_effects:
+    version: "~1.2.1"
+    matches:
+      - if: "$CONFIG{USE_WEBRTC_CALL} == False"
+      - if: "$CONFIG{USE_WEBRTC_CALL} == True"
+        version: "~1.3"
+  espressif/esp_audio_codec:
+    version: "~2.4.1"
+    matches:
+      - if: "$CONFIG{USE_WEBRTC_CALL} == False"
+      - if: "$CONFIG{USE_WEBRTC_CALL} == True"
+        version: "~2.5"
+  espressif/esp_codec_dev: ~1.5.6
+  espressif/esp-sr:
+    version: "~2.3.0"
+    matches:
+      - if: "$CONFIG{USE_WEBRTC_CALL} == False"
+      - if: "$CONFIG{USE_WEBRTC_CALL} == True"
+        version: "^2.4"
+  espressif/button: ~4.1.5
+
+  espressif/esp_lcd_ili9341: ==1.2.0
+  espressif/esp_lcd_touch_ft5x06: ~1
+  lvgl/lvgl: ~9.5.0
+  esp_lvgl_port: ~2.7.2
+
+  espressif/esp32-camera:
+    version: ^2.1.6
+    rules:
+    - if: target in [esp32s3]
+
+  espressif/esp_new_jpeg: ^0.6.1
+  espressif/esp_image_effects: ^1.1.0
+  espressif2022/image_player: ^1.1.1
+  espressif2022/esp_emote_expression: ^0.1.0
+  espressif/esp_mmap_assets: ^1.3.2
+
+  ## --- WebRTC call feature (only when CONFIG_USE_WEBRTC_CALL=y) ---
+  ## Vendored esp-webrtc components live in the repo-root esp-webrtc/ dir (NOT
+  ## components/, so ESP-IDF does not auto-discover them) and are pulled via
+  ## override_path only when the feature is on. When OFF none of this enters the
+  ## dependency graph -> default build unchanged.
+  tempotian/esp_webrtc:
+    version: "*"
+    override_path: "../esp-webrtc/esp_webrtc"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  espressif/esp_peer:
+    version: "*"
+    override_path: "../esp-webrtc/esp_peer"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  tempotian/av_render:
+    version: "*"
+    override_path: "../esp-webrtc/av_render"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  tempotian/media_lib_utils:
+    version: "*"
+    override_path: "../esp-webrtc/media_lib_utils"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  webrtc_utils:
+    version: "*"
+    override_path: "../esp-webrtc/webrtc_utils"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  espressif/esp_capture:
+    version: "~1.0"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  espressif/esp_video_codec:
+    version: "~0.5"
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+  espressif/esp_h264:
+    version: "~1.3"
+    rules: [ { if: "target in [esp32s3]" } ]
+    matches: [ { if: "$CONFIG{USE_WEBRTC_CALL} == True" } ]
+
+  ## Required IDF version
+  idf:
+    version: '>=5.5.2'

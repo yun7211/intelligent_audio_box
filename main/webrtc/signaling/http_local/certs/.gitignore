@@ -1,0 +1,4 @@
+# Self-signed test certs are generated locally with OpenSSL (see README.md)
+# and are intentionally NOT committed — a dev key in git is public/insecure.
+servercert.pem
+prvtkey.pem

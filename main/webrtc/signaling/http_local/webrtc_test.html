@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>小智 WebRTC 通话</title>
+    <link rel="icon" href="data:,">
+    <!--
+      Xiaozhi WebRTC call page.
+      Ported from esp-webrtc-solution doorbell_local/webrtc_test.html: kept the
+      proven SSE + offer/answer/candidate signaling core; removed doorbell UI,
+      RTP transformer, data-channel stress test, and local-video.
+      The device is the offerer (is_initiator=true); this page answers.
+      #remoteVideo plays the remote audio and shows the device camera when the
+      board has one (device -> browser video is SEND_ONLY).
+
+      Remote unlock travels over the WebRTC DataChannel ONLY, mirroring
+      web/doorbell/js/{peer,door}.js and the firmware's trust boundary in
+      DoorbellController::HandleOpenDoorRequest(). Sending OPEN_DOOR over the
+      signaling channel instead would land in DoOpenDoor(), which only updates
+      the on-screen status text and never drives the GPIO -- the button would
+      report success while the lock never fired. The device creates the channel
+      (it is the offerer), so this page uses pc.ondatachannel and must never
+      call createDataChannel.
+
+      This page prints no SDP, ICE/TURN credentials, or control-message bodies
+      to the console -- only message types and outcomes.
+    -->
+    <style>
+        body { font-family: system-ui, Arial, sans-serif; max-width: 720px; margin: 0 auto;
+               padding: 20px; background: #f5f5f5; color: #222; }
+        h1 { font-size: 20px; }
+        .stage { position: relative; background: #000; border-radius: 8px; overflow: hidden;
+                 aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center; }
+        video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+        .hint { position: absolute; color: #888; font-size: 14px; }
+        .controls { display: flex; gap: 12px; margin-top: 16px; }
+        button { flex: 1; padding: 14px 18px; font-size: 16px; border: none; border-radius: 6px;
+                 color: #fff; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .join { background: #28a745; }
+        .hangup { background: #dc3545; }
+        #status { margin-top: 14px; padding: 10px; border-radius: 6px; text-align: center;
+                  font-weight: 600; }
+        .connected { background: #d4edda; color: #155724; }
+        .disconnected { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>小智 WebRTC 通话</h1>
+
+    <div class="stage">
+        <span class="hint" id="stageHint">点击“加入通话”开始</span>
+        <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+
+    <div class="controls">
+        <button id="joinButton" class="join">加入通话</button>
+        <button id="openButton" class="join" disabled>开门</button>
+        <button id="hangupButton" class="hangup" disabled>挂断</button>
+    </div>
+
+    <div id="status" class="disconnected">未连接</div>
+
+    <script>
+        const signalingUrl = '/webrtc/signal';
+        const signalingPostUrl = '/webrtc/signal/post';
+        const DOOR_TIMEOUT_MS = 6000;
+
+        let localStream = null;
+        let peerConnection = null;
+        let dataChannel = null;     // created by the device; we only receive it
+        let eventSource = null;
+        let pendingCandidates = [];
+        let ready = false;          // user granted mic (a gesture is required)
+        let pendingOffer = null;    // offer that arrived before the user joined
+        let doorPendingId = null;   // in-flight open_door request_id (one at a time)
+        let doorTimer = null;
+
+        const remoteVideo = document.getElementById('remoteVideo');
+        const joinButton = document.getElementById('joinButton');
+        const openButton = document.getElementById('openButton');
+        const hangupButton = document.getElementById('hangupButton');
+        const statusDiv = document.getElementById('status');
+        const stageHint = document.getElementById('stageHint');
+
+        function setStatus(text, connected) {
+            statusDiv.textContent = text;
+            statusDiv.className = connected ? 'connected' : 'disconnected';
+        }
+
+        // ---- signaling transport (SSE in, POST out) ----------------------
+        function startSignaling() {
+            if (eventSource) eventSource.close();
+            eventSource = new EventSource(signalingUrl);
+
+            eventSource.onopen = () => setStatus('已连接信令，等待设备…', true);
+
+            eventSource.onmessage = async (event) => {
+                let message;
+                try { message = JSON.parse(event.data); } catch (e) { return; }
+                switch (message.type) {
+                    case 'connected': break;
+                    case 'offer':
+                        if (!peerConnection) {
+                            if (ready) await handleOffer(message);
+                            else pendingOffer = message;   // wait for the user gesture
+                        }
+                        break;
+                    case 'answer':
+                        if (peerConnection) await handleAnswer(message);
+                        break;
+                    case 'candidate':
+                        if (peerConnection) await handleCandidate(message);
+                        break;
+                    case 'bye':
+                        handleHangup();
+                        break;
+                    case 'customized':
+                        handleCustom(message.data);
+                        break;
+                    case 'heartbeat':
+                        break;
+                    default:
+                        console.warn('Unknown message type:', message.type);
+                }
+            };
+
+            eventSource.onerror = () => {
+                setStatus('信令连接错误，重连中…', false);
+                if (eventSource) {
+                    eventSource.close();
+                    setTimeout(startSignaling, 5000);
+                }
+            };
+        }
+
+        function sendSignalingMessage(message) {
+            fetch(signalingPostUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(message)
+            }).catch(err => setStatus('发送失败: ' + err.message, false));
+        }
+
+        // Custom data that arrived over the SIGNALING channel. The device sends
+        // RING this way on purpose (it fires before the DataChannel is open), so
+        // ring is the only thing accepted here. Door results are deliberately NOT
+        // accepted from signaling: anyone on this LAN can POST a signaling
+        // message, and a forged "door opened" would be a lie about a physical
+        // lock. Real results only arrive on the DataChannel.
+        function handleCustom(data) {
+            if (typeof data === 'string' && data.indexOf('RING') === 0) {
+                setStatus('设备正在振铃…', true);
+            }
+        }
+
+        // ---- data channel (control plane for remote unlock) ----------------
+        // The device is the offerer and creates the channel, so we wait for it.
+        // Never call createDataChannel() here: a second channel would not be the
+        // one the firmware reads from.
+        function attachDataChannel(channel) {
+            dataChannel = channel;
+            channel.onmessage = (event) => {
+                if (typeof event.data === 'string') handleDoorResult(event.data);
+            };
+            channel.onopen  = () => updateOpenButton();
+            channel.onclose = () => {
+                resetDoorRequest('控制通道已关闭，开门结果未知');
+                updateOpenButton();
+            };
+            // onopen may have already fired before we got here, so re-check.
+            updateOpenButton();
+        }
+
+        function doorChannelReady() {
+            return peerConnection && peerConnection.connectionState === 'connected'
+                && dataChannel && dataChannel.readyState === 'open';
+        }
+
+        // The button is enabled only when a request could actually reach the lock.
+        // Offering it earlier would invite a click that silently does nothing.
+        function updateOpenButton() {
+            openButton.disabled = !doorChannelReady() || doorPendingId !== null;
+        }
+
+        function newRequestId() {
+            // getRandomValues, not Math.random: request_id doubles as the proof
+            // that a reply belongs to this request.
+            const bytes = new Uint8Array(8);
+            crypto.getRandomValues(bytes);
+            return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // Clear in-flight state. Pass a reason to surface it to the user.
+        function resetDoorRequest(reason) {
+            if (doorTimer !== null) { clearTimeout(doorTimer); doorTimer = null; }
+            const was = doorPendingId !== null;
+            doorPendingId = null;
+            updateOpenButton();
+            if (was && reason) setStatus(reason, false);
+        }
+
+        const DOOR_STATUS_TEXT = {
+            opened: '已开门',
+            busy:   '设备忙，请稍后再试',
+            denied: '已拒绝（通话未建立）',
+            error:  '执行失败（设备端出错）',
+        };
+
+        function handleDoorResult(text) {
+            let msg;
+            try { msg = JSON.parse(text); } catch (_) { return; }  // no echo of content
+            if (msg === null || typeof msg !== 'object' || msg.type !== 'door_result') return;
+            // Only an exactly matching request_id counts. A late reply from a
+            // request that already timed out must not be shown as this one's
+            // result -- the user would read it as the outcome of their last click.
+            if (doorPendingId === null || msg.request_id !== doorPendingId) return;
+            const status = typeof msg.status === 'string' ? msg.status : '';
+            resetDoorRequest();
+            const label = DOOR_STATUS_TEXT[status] || '执行失败（未知状态）';
+            setStatus(label, status === 'opened');
+        }
+
+        openButton.onclick = () => {
+            if (doorPendingId !== null || !doorChannelReady()) return;
+            const id = newRequestId();
+            // Mark in flight before sending: a reply could in principle be
+            // delivered before send() returns, and it must match by then.
+            doorPendingId = id;
+            updateOpenButton();
+            try {
+                dataChannel.send(JSON.stringify({ type: 'open_door', request_id: id }));
+            } catch (e) {
+                // Send threw = the lock definitely did not move. This is the only
+                // failure path that can honestly say "not opened".
+                resetDoorRequest();
+                setStatus('发送失败，门未打开', false);
+                return;
+            }
+            setStatus('开门请求已发送…', true);
+            // Timeout says "unknown", never "failed", and NEVER auto-resends: one
+            // request is one physical action, so a resend can open the door twice.
+            doorTimer = setTimeout(() => {
+                resetDoorRequest('结果未知：未收到设备应答，请确认门的实际状态后再决定是否重试');
+            }, DOOR_TIMEOUT_MS);
+        };
+
+        // ---- peer connection --------------------------------------------
+        function createPeerConnection() {
+            const configuration = {
+                iceServers: [{ urls: ['stun:stun.l.google.com:19302',
+                                      'stun:stun1.l.google.com:19302'] }],
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require',
+                sdpSemantics: 'unified-plan'
+            };
+            const pc = new RTCPeerConnection(configuration);
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendSignalingMessage({
+                        type: 'candidate',
+                        candidate: event.candidate.candidate,
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex
+                    });
+                }
+            };
+
+            pc.ontrack = (event) => {
+                if (event.streams && event.streams[0]) {
+                    remoteVideo.srcObject = event.streams[0];
+                    stageHint.style.display = 'none';
+                }
+            };
+
+            pc.ondatachannel = (event) => attachDataChannel(event.channel);
+
+            pc.oniceconnectionstatechange = () => {
+                if (pc.iceConnectionState === 'failed') pc.restartIce();
+            };
+
+            pc.onconnectionstatechange = () => {
+                const s = pc.connectionState;
+                if (s === 'connected') setStatus('通话中', true);
+                if (s === 'disconnected' || s === 'failed' || s === 'closed') handleHangup();
+                updateOpenButton();
+            };
+
+            return pc;
+        }
+
+        // Device is the offerer; this page answers.
+        async function handleOffer(message) {
+            try {
+                peerConnection = createPeerConnection();
+                if (!localStream) {
+                    // 浏览器侧 AEC 处理浏览器自身扬声器回声；设备侧 MMR AEC 独立处理
+                    // ES8311 到 ES7210 的回声，两端各自负责自己的声学环境。
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        },
+                        video: false
+                    });
+                }
+                localStream.getTracks().forEach(t => peerConnection.addTrack(t, localStream));
+
+                await peerConnection.setRemoteDescription(
+                    new RTCSessionDescription({ type: 'offer', sdp: message.sdp }));
+
+                for (const c of pendingCandidates) {
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate({
+                            candidate: c.candidate,
+                            sdpMid: c.sdpMid || '0',
+                            sdpMLineIndex: c.sdpMLineIndex || 0
+                        }));
+                    } catch (e) { console.error('queued candidate error', e); }
+                }
+                pendingCandidates = [];
+
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                sendSignalingMessage({ type: 'answer', sdp: answer.sdp });
+            } catch (e) {
+                console.error('handleOffer error', e);
+                handleHangup();
+            }
+        }
+
+        async function handleAnswer(message) {
+            try {
+                await peerConnection.setRemoteDescription(
+                    new RTCSessionDescription({ type: 'answer', sdp: message.sdp }));
+            } catch (e) { console.error('handleAnswer error', e); }
+        }
+
+        async function handleCandidate(message) {
+            try {
+                if (peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate({
+                        candidate: message.candidate,
+                        sdpMid: message.sdpMid || '0',
+                        sdpMLineIndex: message.sdpMLineIndex || 0
+                    }));
+                } else {
+                    pendingCandidates.push(message);   // queue until remote description is set
+                }
+            } catch (e) { console.error('addIceCandidate error', e); }
+        }
+
+        // ---- call control ------------------------------------------------
+        joinButton.onclick = async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: false
+                });
+                ready = true;
+                joinButton.disabled = true;
+                hangupButton.disabled = false;
+                // 开门按钮不在这里放开：它要等 DataChannel 真的 open（见
+                // updateOpenButton），否则用户会点一个还到不了门锁的按钮。
+                updateOpenButton();
+                setStatus('已加入，等待设备接通…', true);
+                if (pendingOffer) { const o = pendingOffer; pendingOffer = null; await handleOffer(o); }
+            } catch (e) {
+                setStatus('麦克风获取失败: ' + e.message, false);
+            }
+        };
+
+        hangupButton.onclick = handleHangup;
+
+        function handleHangup() {
+            sendSignalingMessage({ type: 'bye' });
+            // 连接一拆，在途开门请求的应答就永远不会来了。这里先记下它，再在最后决定
+            // 状态文字 —— 不能让下面那句"通话结束"把"结果未知"盖掉：挂断不等于门没开，
+            // 而"门到底开没开"是这一屏里唯一不能丢的信息。
+            const doorWasPending = doorPendingId !== null;
+            resetDoorRequest();
+            dataChannel = null;
+            if (peerConnection) { peerConnection.close(); peerConnection = null; }
+            if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+            remoteVideo.srcObject = null;
+            ready = false;
+            pendingCandidates = [];
+            pendingOffer = null;
+            stageHint.style.display = '';
+            joinButton.disabled = false;
+            hangupButton.disabled = true;
+            openButton.disabled = true;
+            setStatus(doorWasPending
+                ? '通话结束；开门结果未知，请确认门的实际状态'
+                : '通话结束', false);
+        }
+
+        window.onload = startSignaling;
+    </script>
+</body>
+</html>

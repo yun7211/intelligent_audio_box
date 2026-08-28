@@ -1,0 +1,21 @@
+menu "Codec Board Configuration"
+
+choice
+    prompt "Selection for codec board"
+    default SZPI_ESP32S3_BOARD
+    help
+        Select a codec board
+config ESP32_S3_BOX_3_BOARD
+    depends on IDF_TARGET_ESP32S3
+    bool "ESP32 S3 BOX 3"
+config SZPI_ESP32S3_BOARD
+    depends on IDF_TARGET_ESP32S3
+    bool "SZPI ESP32S3 (LCKFB)"
+endchoice
+
+config CODEC_BOARD
+    string
+    default "ESP32_S3_BOX_3" if ESP32_S3_BOX_3_BOARD
+    default "SZPI_ESP32S3" if SZPI_ESP32S3_BOARD
+    default ""
+endmenu

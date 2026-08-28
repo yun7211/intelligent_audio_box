@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- 本页不加载任何外部资源，顺手用 CSP 把这件事固化下来：门锁控制页面不该有
+         被第三方脚本注入的可能。connect-src 只留 https/wss，因为信令要走这两个。 -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; script-src 'self'; style-src 'self';
+                   connect-src https: wss:; media-src blob:; img-src 'self' data:">
+    <title>门铃 · 远程通话与开门</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<main class="app">
+    <h1 class="title">门铃 · 远程通话与开门</h1>
+
+    <!-- 1. 通话 -->
+    <section class="card">
+        <h2 class="card-title">通话</h2>
+        <div class="row">
+            <label class="label" for="room">房间号</label>
+            <input class="input" id="room" type="text" inputmode="numeric"
+                   autocomplete="off" placeholder="与设备屏幕上显示的一致">
+            <button class="btn" id="joinBtn" type="button">加入</button>
+            <button class="btn btn-ghost" id="hangupBtn" type="button" disabled>挂断</button>
+        </div>
+        <p class="status" id="callStatus">未连接</p>
+
+        <div class="stage">
+            <!-- 设备侧是单向视频（设备发、页面收），所以这里只有一个远端画面 -->
+            <video id="remoteVideo" playsinline autoplay></video>
+            <p class="stage-hint" id="videoHint">等待设备画面…</p>
+        </div>
+    </section>
+
+    <!-- 2. 远程开门。刻意独立成一块，并且和通话按钮不同色：
+            它是唯一会驱动门锁的操作，不能让人误以为是"接通"之类的普通按钮。 -->
+    <section class="card card-door">
+        <h2 class="card-title">远程开门</h2>
+        <p class="hint">
+            仅在通话已接通、且控制通道已打开时可用。命令只通过 WebRTC 数据通道下发。
+        </p>
+        <button class="btn btn-door" id="unlockBtn" type="button" disabled>远程开门</button>
+        <p class="status status-door" id="doorStatus">未就绪</p>
+    </section>
+
+    <!-- 3. 事件日志。只记事件名和状态，不含 SDP、凭证或控制消息内容。 -->
+    <section class="card">
+        <h2 class="card-title">事件日志</h2>
+        <div class="log" id="logView" aria-live="polite"></div>
+    </section>
+</main>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

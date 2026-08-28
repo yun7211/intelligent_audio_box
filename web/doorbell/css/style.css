@@ -1,0 +1,183 @@
+/* 门铃页面样式。只有布局和配色，没有任何行为 —— 交互全在 js/ 里。
+ *
+ * 一条贯穿的取舍：开门那一块用独立配色和更大的按钮，和"加入/挂断"在视觉上明确分开。
+ * 它是本页唯一会驱动门锁的操作，长得像普通按钮就迟早会被误点。
+ */
+
+:root {
+    --bg: #14161a;
+    --card: #1d2026;
+    --card-door: #26201c;
+    --line: #2e333c;
+    --text: #e6e8ec;
+    --text-dim: #9aa1ad;
+    --accent: #4b8bf5;
+    --door: #e0862f;
+    --door-strong: #f0a04b;
+    --ok: #4cc38a;
+    --warn: #e0b341;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.app {
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+.title {
+    margin: 8px 0 16px;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+}
+
+.card-door {
+    background: var(--card-door);
+    border-color: #46372c;
+}
+
+.card-title {
+    margin: 0 0 10px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-dim);
+    letter-spacing: .04em;
+}
+
+/* 窄屏（手机上开门是最常见的场景）自动换行，按钮不被挤成一条缝 */
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.label {
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.input {
+    flex: 1 1 140px;
+    min-width: 0;
+    padding: 9px 11px;
+    background: #14161a;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--text);
+    font: inherit;
+}
+
+.input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.btn {
+    padding: 9px 18px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+}
+
+.btn-ghost {
+    background: transparent;
+    border-color: var(--line);
+    color: var(--text-dim);
+}
+
+/* 禁用态必须一眼看得出来：开门按钮的可用性就是这套设计的安全边界之一，
+   "看起来能点但点了没反应"会让人反复点，反复点又会撞上设备侧的 busy。 */
+.btn:disabled {
+    opacity: .42;
+    cursor: not-allowed;
+}
+
+.btn-door {
+    width: 100%;
+    margin-top: 4px;
+    padding: 15px;
+    background: var(--door);
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: .06em;
+}
+
+.btn-door:enabled:hover {
+    background: var(--door-strong);
+}
+
+.hint {
+    margin: 0 0 10px;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.status {
+    margin: 10px 0 0;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.status-door {
+    font-size: 14px;
+}
+
+.status.is-ok   { color: var(--ok); }
+.status.is-warn { color: var(--warn); }
+
+.stage {
+    position: relative;
+    margin-top: 12px;
+    background: #0c0d10;
+    border-radius: 8px;
+    overflow: hidden;
+    aspect-ratio: 4 / 3;
+}
+
+.stage video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.stage-hint {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    pointer-events: none;
+}
+
+.log {
+    max-height: 190px;
+    overflow-y: auto;
+    font: 12px/1.7 ui-monospace, Consolas, monospace;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
