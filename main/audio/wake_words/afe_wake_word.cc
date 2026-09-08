@@ -163,8 +163,12 @@ void AfeWakeWord::AudioDetectionTask() {
 void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
     // 按 AFE 数据块保存前滚音频。
     wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
-    // 只保留约 2 秒：16 kHz、512 点一块，单块约 30 ms。
-    while (wake_word_pcm_.size() > 2000 / 30) {
+    // 按实际样本数裁剪窗口（16 kHz × 2 秒），不依赖"一块约 30 ms"的写死假设，
+    // 换模型/换 AFE chunksize 时窗口时长仍然准确。
+    wake_word_samples_ += samples;
+    const size_t kWindowSamples = 16000 * 2;
+    while (wake_word_samples_ > kWindowSamples && !wake_word_pcm_.empty()) {
+        wake_word_samples_ -= wake_word_pcm_.front().size();
         wake_word_pcm_.pop_front();
     }
 }
@@ -239,6 +243,7 @@ void AfeWakeWord::EncodeWakeWordData() {
                 }
             }
             this_->wake_word_pcm_.clear();
+            this_->wake_word_samples_ = 0;
             // 编码任务结束后立即释放临时编码器。
             esp_opus_enc_close(encoder_handle);
             auto end_time = esp_timer_get_time();

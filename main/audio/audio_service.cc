@@ -194,9 +194,28 @@ void AudioService::Stop() {
 void AudioService::Suspend() {
     // 先通知音频任务退出并清空队列。
     Stop();
-    // 给输入/输出任务留时间观察停止标志；确认它们不再访问 codec 后，才能把设备句柄交给
-    // WebRTC 独占使用。
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // 等输入/输出任务确认退出（它们是 codec 设备的直接使用者），替代固定延时。
+    // FreeRTOS 任务 vTaskDelete 后句柄仍可查询 eDeleted，据此判定"已退出"。
+    const TaskHandle_t consumers[] = { audio_input_task_handle_, audio_output_task_handle_ };
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+    bool exited = false;
+    do {
+        exited = true;
+        for (auto h : consumers) {
+            if (h != nullptr && eTaskGetState(h) != eDeleted) {
+                exited = false;
+                break;
+            }
+        }
+        if (!exited) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    } while (!exited && xTaskGetTickCount() < deadline);
+    if (!exited) {
+        // 兜底：超时后照常移交，避免音频任务异常时把整机卡死在挂起流程里。
+        ESP_LOGW(TAG, "Audio tasks did not exit within 500ms");
+    }
+
     if (codec_) {
         codec_->EnableInput(false);   // 最终关闭 esp_codec_dev 输入设备
         codec_->EnableOutput(false);  // 最终关闭 esp_codec_dev 输出设备

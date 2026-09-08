@@ -62,6 +62,9 @@ private:
     StaticTask_t* wake_word_encode_task_buffer_ = nullptr;
     StackType_t* wake_word_encode_task_stack_ = nullptr;
     std::deque<std::vector<int16_t>> wake_word_pcm_;
+    // 前滚窗口已缓存样本总数，用于按实际样本数裁剪窗口（16 kHz × 2 秒），
+    // 不依赖"一块约 30 ms"的写死假设。
+    size_t wake_word_samples_ = 0;
     std::deque<std::vector<uint8_t>> wake_word_opus_;
     // PCM 生产者与 Opus 编码任务通过队列和条件变量解耦，避免阻塞实时检测。
     std::mutex wake_word_mutex_;

@@ -125,7 +125,6 @@ static uint8_t* convert_input_to_encoder_buf(const uint8_t* src, uint16_t width,
     }
 
     // RGB 转换为 YUV422 (YCbYCr) 再输入
-    // 见 https://github.com/78/xiaozhi-esp32/issues/1380#issuecomment-3497156378
     else if (format == V4L2_PIX_FMT_RGB24 || format == V4L2_PIX_FMT_RGB565 || format == V4L2_PIX_FMT_RGB565X) {
         esp_imgfx_pixel_fmt_t in_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB888;
         uint32_t src_len = 0;

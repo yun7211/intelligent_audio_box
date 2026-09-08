@@ -209,8 +209,11 @@ size_t CustomWakeWord::GetFeedSize() {
 void CustomWakeWord::StoreWakeWordData(const std::vector<int16_t>& data) {
     // 保存命中前的前滚音频。
     wake_word_pcm_.push_back(data);
-    // 最多保留约 2 秒：16 kHz、512 点一块，单块约 30 ms。
-    while (wake_word_pcm_.size() > 2000 / 30) {
+    // 按实际样本数裁剪窗口（16 kHz × 2 秒），不依赖"一块约 30 ms"的写死假设。
+    wake_word_samples_ += data.size();
+    const size_t kWindowSamples = 16000 * 2;
+    while (wake_word_samples_ > kWindowSamples && !wake_word_pcm_.empty()) {
+        wake_word_samples_ -= wake_word_pcm_.front().size();
         wake_word_pcm_.pop_front();
     }
 }
@@ -279,6 +282,7 @@ void CustomWakeWord::EncodeWakeWordData() {
                 }
             }
             this_->wake_word_pcm_.clear();
+            this_->wake_word_samples_ = 0;
             // 编码完成后释放临时编码器。
             esp_opus_enc_close(encoder_handle);
             auto end_time = esp_timer_get_time();

@@ -43,6 +43,8 @@ static esp_peer_signaling_cfg_t sig_cfg = { 0 };
 static bool event_stream_connected = false;
 static bool event_stream_stopping  = false;
 static httpd_req_t *event_stream_req = NULL;
+// 心跳定时器：每 5 秒把心跳 JSON 投递进 signaling_queue，由 signal_hdlr 任务统一发送。
+static esp_timer_handle_t heartbeat_timer_ = NULL;
 
 static int send_event_stream_msg(httpd_req_t *req, char *data)
 {
@@ -57,30 +59,38 @@ static int send_event_stream_msg(httpd_req_t *req, char *data)
     return ret;
 }
 
+// 心跳定时器回调：把心跳作为普通消息入队，由 signal_hdlr 任务负责发送，避免在
+// esp_timer 任务上直接做网络 I/O（send 可能阻塞整个定时器服务）。
+static void heartbeat_timer_cb(void *arg)
+{
+    char *hb = strdup("{\"type\":\"heartbeat\"}");
+    if (hb == NULL) {
+        return;
+    }
+    if (xQueueSend(signaling_queue, &hb, pdMS_TO_TICKS(10)) != pdTRUE) {
+        free(hb);
+    }
+}
+
 static void signaling_msg_send_task(void *arg)
 {
-    uint32_t hear_beat = esp_timer_get_time() / 1000;
+    // 队列消息要么是信令、要么是心跳定时器投递的心跳；收到即发送，无事纯阻塞。
     while (!event_stream_stopping) {
         char *msg = NULL;
-        int ret = 0;
-        if (xQueueReceive(signaling_queue, &msg, pdMS_TO_TICKS(100)) == pdTRUE) {
-            if (msg) {
-                ret = send_event_stream_msg(event_stream_req, msg);
-                free(msg);
-                if (ret != 0) {
-                    break;
-                }
-            }
+        if (xQueueReceive(signaling_queue, &msg, portMAX_DELAY) != pdTRUE) {
+            break;
         }
-        // 心跳让浏览器及时发现设备离线，也避免中间设备回收空闲 SSE 连接。
-        if (esp_timer_get_time() / 1000 - hear_beat > 5000) {
-            hear_beat = esp_timer_get_time() / 1000;
-            ret = send_event_stream_msg(event_stream_req, "{\"type\":\"heartbeat\"}");
-            if (ret != 0) {
-                ESP_LOGE(TAG, "Failed to send heartbeat ret %d", ret);
-                break;
-            }
+        if (msg == NULL) {   // deinit 投递的停止哨兵
+            break;
         }
+        int ret = send_event_stream_msg(event_stream_req, msg);
+        free(msg);
+        if (ret != 0) {
+            break;
+        }
+    }
+    if (heartbeat_timer_ != NULL) {
+        esp_timer_stop(heartbeat_timer_);
     }
     httpd_req_async_handler_complete(event_stream_req);
     event_stream_req = NULL;
@@ -105,6 +115,11 @@ static esp_err_t webrtc_signal_get_handler(httpd_req_t *req)
     event_stream_connected = true;
     httpd_req_async_handler_begin(req, &event_stream_req);
     if (event_stream_req) {
+        // 心跳让浏览器及时发现设备离线，也避免中间设备回收空闲 SSE 连接；
+        // 只在有客户端监听时投递。
+        if (heartbeat_timer_ != NULL) {
+            esp_timer_start_periodic(heartbeat_timer_, 5000 * 1000);
+        }
         xTaskCreate(signaling_msg_send_task, "signal_hdlr", 4096, NULL, 5, NULL);
     }
     return ESP_OK;
@@ -311,6 +326,23 @@ static esp_err_t webrtc_http_server_init(esp_peer_signaling_cfg_t *cfg, esp_peer
         ESP_LOGE(TAG, "Failed to create signaling queue");
         return ESP_FAIL;
     }
+
+    if (heartbeat_timer_ != NULL) {
+        esp_timer_delete(heartbeat_timer_);
+        heartbeat_timer_ = NULL;
+    }
+    esp_timer_create_args_t hb_timer_args = {
+        .callback = heartbeat_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "hb_timer",
+        .skip_unhandled_events = true,   // 心跳丢失可接受，不需要排队重发
+    };
+    if (esp_timer_create(&hb_timer_args, &heartbeat_timer_) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create heartbeat timer");
+        heartbeat_timer_ = NULL;
+    }
+
     esp_err_t ret = init_http_server();
     if (ret != ESP_OK) {
         vQueueDelete(signaling_queue);
@@ -402,6 +434,9 @@ static int webrtc_http_server_deinit(esp_peer_signaling_handle_t sig)
         return -1;
     }
     ESP_LOGI(TAG, "Start to stop https server");
+    if (heartbeat_timer_ != NULL) {
+        esp_timer_stop(heartbeat_timer_);
+    }
     if (signaling_queue) {
         char *msg = NULL;
         while (xQueueReceive(signaling_queue, &msg, 0) == pdTRUE) {
@@ -412,9 +447,16 @@ static int webrtc_http_server_deinit(esp_peer_signaling_handle_t sig)
     }
     if (event_stream_connected) {
         event_stream_stopping = true;
+        // 入队 NULL 哨兵，唤醒阻塞在 xQueueReceive(portMAX_DELAY) 上的发送任务退出。
+        char *stop_sentinel = NULL;
+        xQueueSend(signaling_queue, &stop_sentinel, pdMS_TO_TICKS(100));
         while (event_stream_connected) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
+    }
+    if (heartbeat_timer_ != NULL) {
+        esp_timer_delete(heartbeat_timer_);
+        heartbeat_timer_ = NULL;
     }
     if (server) {
         httpd_ssl_stop(server);

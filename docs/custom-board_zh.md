@@ -366,7 +366,7 @@ endif()
    idf.py menuconfig
    ```
    
-   在菜单中导航到：`Xiaozhi Assistant` -> `Board Type`，选择你的自定义开发板。
+   在菜单中导航到：`Assistant` -> `Board Type`，选择你的自定义开发板。
 
 4. **编译和烧录**：
    ```bash
