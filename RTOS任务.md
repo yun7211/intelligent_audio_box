@@ -14,7 +14,7 @@
 | 常驻 | `opus_codec` | [audio_service.cc:171](main/audio/audio_service.cc#L171) | 24 KB | 2 | 任意 | Start 时创建，Stop 退出 |
 | 常驻 | `audio_detection` | [afe_wake_word.cc:83](main/audio/wake_words/afe_wake_word.cc#L83) | 4 KB | 3 | 任意 | 随唤醒词对象 |
 | 常驻 | `audio_communication` | [afe_audio_processor.cc:81](main/audio/processors/afe_audio_processor.cc#L81) | 4 KB | 3 | 任意 | 随处理器对象 |
-| 常驻 | `LedEvent` | [gpio_led.cc:81](main/led/gpio_led.cc#L81) | 2 KB | `tskIDLE_PRIORITY+2` = 2 | 任意 | 整机运行 |
+| 条件 | `LedEvent` | [gpio_led.cc:81](main/led/gpio_led.cc#L81) | 2 KB | `tskIDLE_PRIORITY+2` = 2 | 任意 | 仅板级实现 LED 时创建；当前两块支持板型用 `NoLed`，不创建 |
 | 按需 | `encode_wake_word` | [afe_wake_word.cc:184](main/audio/wake_words/afe_wake_word.cc#L184) / [custom_wake_word.cc:230](main/audio/wake_words/custom_wake_word.cc#L230) | 24 KB / 28 KB（**PSRAM 栈**） | 2 | 任意 | 唤醒触发一次，跑完自删 |
 | 按需 | `activation` | [application.cc:357](main/application.cc#L357) | 8 KB | 2 | 任意 | 首次联网创建一次，跑完自删 |
 | 按需 | `wifi_cfg_delay` | [wifi_board.cc:210](main/boards/common/wifi_board.cc#L210) | 4 KB | 2 | 任意 | 进配网模式时创建，跑完自删 |
@@ -25,7 +25,9 @@
 | 条件 | 摄像头 JPEG 编码线程（`std::thread`） | [esp32_camera.cc:199](main/boards/common/esp32_camera.cc#L199) | 系统默认 | — | — | 有摄像头板型 |
 | 归档 | 旧视频任务 | [esp_video.cc:333](main/boards/common/legacy/esp_video.cc#L333) | — | — | — | `legacy/` 目录，不进默认构建 |
 
-默认构建（WebRTC 关闭、无摄像头）常驻 **8 个**任务；全功能开启时含按需/条件任务共约 **14 个**。
+默认构建（WebRTC 关闭、无摄像头）常驻 **6 个**任务（业务主任务 + `audio_input`/`audio_output`/`opus_codec`/`audio_detection`/`audio_communication`）；全功能开启并含按需/条件任务时，同时存在的任务约 **14 个**。
+
+> `LedEvent` 由 `GpioLed` 的构造函数创建（[gpio_led.cc:81](main/led/gpio_led.cc#L81)），而当前两块支持板型都没有实例化任何 LED 类，`Board::GetLed()` 返回默认的 `NoLed`（[board.cc:65](main/boards/common/board.cc#L65)），因此这两块板子上**不会创建 `LedEvent` 任务**。
 
 ---
 
@@ -69,9 +71,10 @@
 - **创建**：[afe_audio_processor.cc:81](main/audio/processors/afe_audio_processor.cc#L81)，栈 4 KB，优先级 3。
 - **职责**：AFE 的 AEC + VAD 处理，支撑 TTS 播放期间的自由打断检测（Speaking 状态持续分析麦克风但不上传）。
 
-### 2.7 `LedEvent` —— LED 状态任务
+### 2.7 `LedEvent` —— LED 状态任务（条件任务，仅 LED 板型）
 
 - **创建**：[gpio_led.cc:81](main/led/gpio_led.cc#L81)，栈 2 KB，优先级 `tskIDLE_PRIORITY + 2`。
+- **条件**：任务在 `GpioLed` 构造函数中创建。当前两块支持板型（`lichuang-dev`、`esp-box-3`）都使用默认的 `NoLed`（[board.cc:65](main/boards/common/board.cc#L65)），**不会创建此任务**；本节描述的是框架侧实现，供后续接入 LED 的板型参考。
 - **职责**：LED 状态机。**GPIO ISR 用 `xTaskNotifyFromISR` 唤醒**，任务侧 `ulTaskNotifyTake(pdTRUE, portMAX_DELAY)` 阻塞等待（[gpio_led.cc:197](main/led/gpio_led.cc#L197)、[:256](main/led/gpio_led.cc#L256)）——任务通知比信号量更轻量，是 ISR → 任务的标准通道。
 
 ### 2.8 `encode_wake_word` —— 唤醒词编码任务（静态创建）
@@ -106,7 +109,7 @@
 
 - **创建**：[webrtc_http_server.c:108](main/webrtc/signaling/http_local/webrtc_http_server.c#L108)，栈 4 KB，优先级 5。
 - **条件**：`CONFIG_WEBRTC_SIGNALING_LOCAL_HTTP` 开启时。
-- **职责**：从 `signaling_queue`（`xQueueCreate`，[webrtc_http_server.c:309](main/webrtc/signaling/http_local/webrtc_http_server.c#L309)）取信令消息向浏览器 SSE 推送；`xQueueReceive` 100 ms 超时轮询，附带 5 s 心跳检测。
+- **职责**：从 `signaling_queue`（`xQueueCreate`，[webrtc_http_server.c:324](main/webrtc/signaling/http_local/webrtc_http_server.c#L324)）取信令消息向浏览器 SSE 推送；任务以 `xQueueReceive(portMAX_DELAY)` **纯阻塞**（[webrtc_http_server.c:80](main/webrtc/signaling/http_local/webrtc_http_server.c#L80)），5 s 心跳由周期 `esp_timer` 把 JSON 投递进同一队列（[webrtc_http_server.c:64](main/webrtc/signaling/http_local/webrtc_http_server.c#L64)、[:121](main/webrtc/signaling/http_local/webrtc_http_server.c#L121)），退出时由 deinit 投递 NULL 哨兵唤醒（[webrtc_http_server.c:450](main/webrtc/signaling/http_local/webrtc_http_server.c#L450)，详见 6.1.2）。
 
 ### 2.14 摄像头 JPEG 编码线程
 
@@ -122,7 +125,7 @@
 | 8 | `audio_input` | 实时性最高；AFE 模式固定核心 0 降低抖动 |
 | 4 | `audio_output` | 播放不能饿死，但低于采集 |
 | 3 | `audio_detection` / `audio_communication` | 唤醒词与 AEC/VAD 检测 |
-| 2 | `opus_codec` / `encode_wake_word` / `activation` / `wifi_cfg_delay` / `acoustic_wifi` / `LedEvent` | 计算量大的编解码与后台业务放低优先级 |
+| 2 | `opus_codec` / `encode_wake_word` / `activation` / `wifi_cfg_delay` / `acoustic_wifi`（`LedEvent` 同优先级，仅 LED 板型创建） | 计算量大的编解码与后台业务放低优先级 |
 | 5 | `signal_hdlr` / BLUFI 任务 | 配网与信令按需任务（相对较高，短促执行） |
 
 ## 4. 所用 RTOS 原语汇总
@@ -133,8 +136,8 @@
 | `xTaskCreatePinnedToCore` | 任务固定核心 | [audio_service.cc:142](main/audio/audio_service.cc#L142) |
 | `xTaskCreateStatic` | 静态创建 + PSRAM 栈 | [afe_wake_word.cc:184](main/audio/wake_words/afe_wake_word.cc#L184) |
 | `xEventGroupCreate/WaitBits/SetBits/ClearBits` | **事件组：跨任务事件通知**（全项目 6 个：Application、AudioService、AfeWakeWord、AfeAudioProcessor、WebSocketProtocol、MqttProtocol） | [application.cc:36](main/application.cc#L36)、[audio_service.cc:262](main/audio/audio_service.cc#L262)、[websocket_protocol.cc:229](main/protocols/websocket_protocol.cc#L229) |
-| `xQueueCreate / xQueueSend / xQueueReceive` | 队列：信令消息、摄像头 JPEG chunk | [webrtc_http_server.c:309](main/webrtc/signaling/http_local/webrtc_http_server.c#L309)、[esp32_camera.cc:192](main/boards/common/esp32_camera.cc#L192) |
-| `xTaskNotifyFromISR / ulTaskNotifyTake` | 任务通知：GPIO ISR → LED 任务 | [gpio_led.cc:197](main/led/gpio_led.cc#L197)、[:256](main/led/gpio_led.cc#L256) |
+| `xQueueCreate / xQueueSend / xQueueReceive` | 队列：信令消息、摄像头 JPEG chunk | [webrtc_http_server.c:324](main/webrtc/signaling/http_local/webrtc_http_server.c#L324)、[esp32_camera.cc:192](main/boards/common/esp32_camera.cc#L192) |
+| `xTaskNotifyFromISR / ulTaskNotifyTake` | 任务通知：GPIO ISR → LED 任务（仅 LED 板型存在，见 2.7） | [gpio_led.cc:197](main/led/gpio_led.cc#L197)、[:256](main/led/gpio_led.cc#L256) |
 | `std::mutex / std::condition_variable` | C++ 同步原语：音频数据队列、`main_tasks_` 闭包队列、协议通道 | [audio_service.cc:322](main/audio/audio_service.cc#L322)、[application.cc:318](main/application.cc#L318) |
 | `esp_timer`（跑在专用 FreeRTOS 任务上） | 周期/单次定时：音频电源管理（1 s）、打断确认（200 ms）、LED 闪烁、门锁脉冲、Wi-Fi 连接超时 | [door_lock.cc:44](main/webrtc/doorbell/door_lock.cc#L44) |
 | `vTaskDelay / pdMS_TO_TICKS` | 延时与时间换算 | 全局 |
