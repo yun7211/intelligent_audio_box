@@ -261,6 +261,7 @@ intelligent_audio_box/
 - [`项目介绍.md`](项目介绍.md) — 完整设计:整体/媒体链路架构、状态机、技术难点、验证事实边界
 - [`RTOS任务.md`](RTOS任务.md) — FreeRTOS 任务清单、优先级与并发原语分工
 - [`docs/webrtc-aec_zh.md`](docs/webrtc-aec_zh.md) — WebRTC 通话期设备端 AEC 方案(ES7210 MMR 硬件参考)
+- [`docs/interview-difficulties_zh.md`](docs/interview-difficulties_zh.md) — 难点讲法:3 分钟主线与追问分支
 
 ---
 
